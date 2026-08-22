@@ -94,6 +94,7 @@ type App struct {
 	stats                  client.StatsSnapshot
 	statsHistory           []statsPoint
 	lastStatsPoll          time.Time
+	lastStallNudge         time.Time
 	launcherOpen           bool
 	launcherMode           launcherMode
 	launcherInput          string
@@ -495,6 +496,15 @@ func (a *App) Update() error {
 			a.applyCursorMode()
 		}
 	}
+	if !a.focused && nowFocused {
+		// Regained focus: drop input pacing state so the first movement is
+		// sent immediately, and force-upload the freshest decoded frame
+		// instead of waiting for the next one from the device.
+		a.lastPointerAt = time.Time{}
+		a.mu.Lock()
+		a.lastFrameAt = time.Time{}
+		a.mu.Unlock()
+	}
 	a.focused = nowFocused
 	a.syncUIPointer()
 	a.updateTextSelectionDrag()
@@ -502,9 +512,14 @@ func (a *App) Update() error {
 	a.syncPasteInput()
 	a.syncMediaInput()
 	a.syncSerialConsoleInput()
-	a.syncVideoFrame()
+	if a.focused {
+		// Skip pixel uploads while backgrounded; the decode goroutine keeps
+		// the latest frame warm, so refocus resumes instantly.
+		a.syncVideoFrame()
+	}
 	a.syncKeyboard()
 	a.syncMouse()
+	a.stallWatchdog()
 	return nil
 }
 
@@ -572,6 +587,33 @@ func (a *App) syncVideoFrame() {
 		return
 	}
 	a.uploadVideoFrame(frame, at)
+}
+
+// stallWatchdog detects a connected session whose video has gone quiet and
+// nudges the device with keyframe requests. Transient stalls recover via the
+// stream's own PLI logic; this catches longer outages (encoder hiccups, lost
+// renegotiations) without user intervention.
+func (a *App) stallWatchdog() {
+	if a.ctrl == nil || a.launcherOpen {
+		return
+	}
+	snap := a.ctrl.Snapshot()
+	if snap.Phase != session.PhaseConnected || !snap.VideoReady {
+		return
+	}
+	a.mu.RLock()
+	last := a.lastFrameAt
+	a.mu.RUnlock()
+	if last.IsZero() || time.Since(last) < 3*time.Second {
+		return
+	}
+	if time.Since(a.lastStallNudge) < 2*time.Second {
+		return
+	}
+	a.lastStallNudge = time.Now()
+	a.runAsync(func() {
+		a.ctrl.RequestKeyFrame()
+	})
 }
 
 func (a *App) uploadVideoFrame(frame image.Image, at time.Time) {

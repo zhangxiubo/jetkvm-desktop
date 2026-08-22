@@ -84,6 +84,7 @@ type Client struct {
 	serialCh       chan SerialConsoleEvent
 	pending        sync.Map
 	requestCounter atomic.Uint64
+	videoSSRC      atomic.Uint64
 	hidReady       chan struct{}
 	hidReadyOnce   sync.Once
 	videoStream    *video.Stream
@@ -210,6 +211,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			return
 		}
 		go c.requestInitialKeyFrame(uint32(track.SSRC()))
+		c.videoSSRC.Store(uint64(track.SSRC()))
 		c.videoMu.Lock()
 		c.videoStream = stream
 		c.videoMu.Unlock()
@@ -400,6 +402,17 @@ func (c *Client) requestInitialKeyFrame(mediaSSRC uint32) {
 			return
 		}
 	}
+}
+
+// RequestKeyFrame asks the device to emit a fresh video keyframe using the
+// SSRC captured when the track attached. Safe to call from any goroutine;
+// it is a no-op before media attaches or after the client closes.
+func (c *Client) RequestKeyFrame() {
+	ssrc := uint32(c.videoSSRC.Load())
+	if ssrc == 0 {
+		return
+	}
+	_ = c.sendPLI(ssrc)
 }
 
 func (c *Client) WaitForHID(ctx context.Context) error {

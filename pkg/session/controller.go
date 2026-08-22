@@ -229,6 +229,18 @@ func (c *Controller) LatestFrame() image.Image {
 	return current.LatestFrame()
 }
 
+// RequestKeyFrame nudges the connected device to emit a fresh video keyframe.
+// Best effort: it is a no-op when no client is connected.
+func (c *Controller) RequestKeyFrame() {
+	c.mu.RLock()
+	current := c.current
+	c.mu.RUnlock()
+	if current == nil {
+		return
+	}
+	current.RequestKeyFrame()
+}
+
 func (c *Controller) LatestFrameInfo() (image.Image, time.Time) {
 	c.mu.RLock()
 	current := c.current

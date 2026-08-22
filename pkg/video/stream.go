@@ -120,18 +120,24 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote, reques
 			samplebuilder.WithMaxTimeDelay(100*time.Millisecond),
 		)
 		gaps := &seqTracker{}
-		pliGate := newRateLimiter(500 * time.Millisecond)
-		requestFrame := func() {
+		// Keyframes are 10-50x the size of delta frames, so requesting them
+		// too eagerly on a lossy link creates bandwidth spikes that cause
+		// further loss. Ordinary sequence gaps recover via inter-frame
+		// prediction most of the time, so gate those requests conservatively;
+		// genuine decoder failures get the fast path instead.
+		gapPLIGate := newRateLimiter(2 * time.Second)
+		errorPLIGate := newRateLimiter(500 * time.Millisecond)
+		requestFrameFrom := func(gate *rateLimiter) {
 			if requestKeyFrame == nil {
 				return
 			}
-			if pliGate.allow() {
+			if gate.allow() {
 				requestKeyFrame()
 			}
 		}
 		// Ask for a keyframe right away so the first picture renders without
 		// waiting out the device's intra-frame period.
-		requestFrame()
+		requestFrameFrom(errorPLIGate)
 		decodeErrStreak := 0
 		for {
 			select {
@@ -145,7 +151,7 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote, reques
 				return
 			}
 			if gaps.advance(pkt.SequenceNumber) {
-				requestFrame()
+				requestFrameFrom(gapPLIGate)
 			}
 			sb.Push(pkt)
 			for {
@@ -165,7 +171,7 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote, reques
 					// periodically afterwards so a corrupted stream can recover
 					// without user intervention.
 					if decodeErrStreak == 1 || decodeErrStreak%30 == 0 {
-						requestFrame()
+						requestFrameFrom(errorPLIGate)
 					}
 					continue
 				}

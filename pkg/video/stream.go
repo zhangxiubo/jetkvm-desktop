@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"runtime"
 	"sync"
 	"time"
@@ -170,7 +171,10 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote, reques
 				}
 				decodeErrStreak = 0
 				if img != nil {
-					stream.publish(Frame{Image: img, At: time.Now()})
+					// Convert to RGBA here, on the decode goroutine, so the UI's
+					// logic ticks (which carry mouse and keyboard input) never
+					// pay for pixel conversion or the associated allocations.
+					stream.publish(Frame{Image: ycbcrToRGBA(img), At: time.Now()})
 				}
 			}
 		}
@@ -323,6 +327,14 @@ func ensureAnnexB(data []byte) []byte {
 		return data
 	}
 	return append([]byte{0x00, 0x00, 0x00, 0x01}, data...)
+}
+
+// ycbcrToRGBA converts a decoded YCbCr frame into an RGBA image. It runs on
+// the decode goroutine so the UI thread only performs GPU pixel uploads.
+func ycbcrToRGBA(src *image.YCbCr) *image.RGBA {
+	dst := image.NewRGBA(image.Rect(0, 0, src.Bounds().Dx(), src.Bounds().Dy()))
+	draw.Draw(dst, dst.Bounds(), src, src.Bounds().Min, draw.Src)
+	return dst
 }
 
 func max(a, b int) int {

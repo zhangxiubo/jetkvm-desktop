@@ -591,6 +591,11 @@ func (a *App) uploadVideoFrame(frame image.Image, at time.Time) {
 }
 
 func frameToRGBA(src image.Image) *image.RGBA {
+	// Frames arrive pre-converted from the video decode goroutine, so the
+	// common path is a zero-copy passthrough and logic ticks stay cheap.
+	if rgba, ok := src.(*image.RGBA); ok {
+		return rgba
+	}
 	bounds := src.Bounds()
 	dst := image.NewRGBA(bounds)
 	imagedraw.Draw(dst, bounds, src, bounds.Min, imagedraw.Src)

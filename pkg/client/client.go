@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
@@ -203,11 +204,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		stream, err := video.AttachRemoteTrack(ctx, track)
+		stream, err := video.AttachRemoteTrack(ctx, track, c.requestKeyFrame(uint32(track.SSRC())))
 		if err != nil {
 			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
 			return
 		}
+		go c.requestInitialKeyFrame(uint32(track.SSRC()))
 		c.videoMu.Lock()
 		c.videoStream = stream
 		c.videoMu.Unlock()
@@ -355,6 +357,49 @@ func (c *Client) Close() error {
 		c.pc = nil
 	}
 	return err
+}
+
+// requestKeyFrame returns a callback asking the remote peer to emit an IDR
+// frame for the given media SSRC by sending a Picture Loss Indication. It is
+// invoked by the video stream on packet loss and unrecoverable decode errors.
+func (c *Client) requestKeyFrame(mediaSSRC uint32) func() {
+	return func() {
+		_ = c.sendPLI(mediaSSRC)
+	}
+}
+
+// sendPLI sends a single Picture Loss Indication for the given SSRC. It is
+// best effort: while the peer connection is shutting down the request is
+// dropped, and the video stream's gap detector will re-issue it as needed.
+func (c *Client) sendPLI(mediaSSRC uint32) error {
+	select {
+	case <-c.closeCh:
+		return nil
+	default:
+	}
+	c.videoMu.RLock()
+	pc := c.pc
+	c.videoMu.RUnlock()
+	if pc == nil {
+		return fmt.Errorf("peer connection closed")
+	}
+	return pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: mediaSSRC}})
+}
+
+// requestInitialKeyFrame asks for a keyframe shortly after the media track
+// attaches. The DTLS transport may still be coming up when the track opens,
+// so retry briefly until one request succeeds or the client closes.
+func (c *Client) requestInitialKeyFrame(mediaSSRC uint32) {
+	for attempt := 0; attempt < 5; attempt++ {
+		select {
+		case <-c.closeCh:
+			return
+		case <-time.After(300 * time.Millisecond):
+		}
+		if err := c.sendPLI(mediaSSRC); err == nil {
+			return
+		}
+	}
 }
 
 func (c *Client) WaitForHID(ctx context.Context) error {

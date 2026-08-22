@@ -80,7 +80,12 @@ func (s *Stream) Close() {
 	})
 }
 
-func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote) (*Stream, error) {
+// AttachRemoteTrack consumes the given video track and decodes it. When
+// requestKeyFrame is non-nil it is invoked whenever the stream decides the
+// remote peer should emit a keyframe: once when media starts flowing, when
+// RTP sequence gaps (packet loss) are detected, and when decoding keeps
+// failing so the picture cannot recover on its own.
+func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote, requestKeyFrame func()) (*Stream, error) {
 	if track.Codec().MimeType != webrtc.MimeTypeH264 {
 		return nil, fmt.Errorf("unsupported codec %s", track.Codec().MimeType)
 	}
@@ -102,12 +107,31 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote) (*Stre
 		// Screen-content H.264 keyframes can span well over hundreds of RTP packets,
 		// especially on real 1080p devices. A too-small samplebuilder buffer drops
 		// fragmented access units before the decoder ever sees a complete frame.
+		// Higher-resolution keyframes can span several thousand packets, so keep
+		// generous headroom, and allow a longer tail wait so reordered or late
+		// packets on a jittery link still assemble instead of being flushed
+		// mid-frame. The delay only bounds waiting for missing packets; complete
+		// frames are emitted immediately.
 		sb := samplebuilder.New(
-			4096,
+			16384,
 			&codecs.H264Packet{},
 			track.Codec().ClockRate,
-			samplebuilder.WithMaxTimeDelay(33*time.Millisecond),
+			samplebuilder.WithMaxTimeDelay(100*time.Millisecond),
 		)
+		gaps := &seqTracker{}
+		pliGate := newRateLimiter(500 * time.Millisecond)
+		requestFrame := func() {
+			if requestKeyFrame == nil {
+				return
+			}
+			if pliGate.allow() {
+				requestKeyFrame()
+			}
+		}
+		// Ask for a keyframe right away so the first picture renders without
+		// waiting out the device's intra-frame period.
+		requestFrame()
+		decodeErrStreak := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -118,6 +142,9 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote) (*Stre
 			pkt, _, readErr := track.ReadRTP()
 			if readErr != nil {
 				return
+			}
+			if gaps.advance(pkt.SequenceNumber) {
+				requestFrame()
 			}
 			sb.Push(pkt)
 			for {
@@ -132,8 +159,16 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote) (*Stre
 				img, err := decoder.Decode(payload)
 				if err != nil {
 					stream.setError(err)
+					decodeErrStreak++
+					// Request a fresh reference frame on the first failure and
+					// periodically afterwards so a corrupted stream can recover
+					// without user intervention.
+					if decodeErrStreak == 1 || decodeErrStreak%30 == 0 {
+						requestFrame()
+					}
 					continue
 				}
+				decodeErrStreak = 0
 				if img != nil {
 					stream.publish(Frame{Image: img, At: time.Now()})
 				}
@@ -142,6 +177,48 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote) (*Stre
 	}()
 
 	return stream, nil
+}
+
+// seqTracker detects discontinuities in RTP sequence numbers while tolerating
+// reordering and duplicate delivery without flagging them as loss. It is not
+// safe for concurrent use; the RTP read loop owns it.
+type seqTracker struct {
+	initialized bool
+	last        uint16
+}
+
+// advance reports whether moving to seq implies that at least one packet was
+// lost. Sequence number wraparound is handled by comparing the signed 16-bit
+// distance between the two values.
+func (t *seqTracker) advance(seq uint16) bool {
+	if !t.initialized {
+		t.initialized = true
+		t.last = seq
+		return false
+	}
+	diff := int16(seq - t.last)
+	t.last = seq
+	return diff > 1
+}
+
+// rateLimiter allows at most one call per interval. It is not safe for
+// concurrent use; the RTP read loop owns it.
+type rateLimiter struct {
+	minInterval time.Duration
+	last        time.Time
+}
+
+func newRateLimiter(minInterval time.Duration) *rateLimiter {
+	return &rateLimiter{minInterval: minInterval}
+}
+
+func (l *rateLimiter) allow() bool {
+	now := time.Now()
+	if !l.last.IsZero() && now.Sub(l.last) < l.minInterval {
+		return false
+	}
+	l.last = now
+	return true
 }
 
 func StartTestPattern(ctx context.Context, width, height, fps int, track *webrtc.TrackLocalStaticSample) error {

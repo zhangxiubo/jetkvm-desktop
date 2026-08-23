@@ -421,7 +421,7 @@ func New(cfg Config) (*App, error) {
 		invertScroll:        prefs.InvertScroll,
 		showPressedKeys:     prefs.ShowPressedKeys,
 		scrollThrottle:      throttleDurationFromMs(prefs.ScrollThrottleMs),
-	sharpenLevel:        prefs.VideoSharpen,
+		sharpenLevel:        prefs.VideoSharpen,
 		pointerMoveThrottle: throttleDurationFromMs(prefs.PointerMoveThrottleMs),
 		pasteDelay:          100,
 		launcherOpen:        launcherOpen,

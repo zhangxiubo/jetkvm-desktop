@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"embed"
+	_ "embed"
 	"errors"
 	"fmt"
 	"image"

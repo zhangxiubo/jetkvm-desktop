@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
@@ -22,6 +23,27 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/signaling"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
 )
+
+// newPeerConnection builds a peer connection that negotiates the same RTCP
+// feedback machinery a browser does: NACK generation for cheap packet-loss
+// recovery, receiver reports, and TWCC feedback. The JetKVM device runs a
+// NACK responder, so lost packets are repaired in one RTT instead of
+// triggering keyframe requests or freeze-until-GOP-end behavior.
+func newPeerConnection() (*webrtc.PeerConnection, error) {
+	mediaEngine := &webrtc.MediaEngine{}
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		return nil, err
+	}
+	interceptorRegistry := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); err != nil {
+		return nil, err
+	}
+	api := webrtc.NewAPI(
+		webrtc.WithMediaEngine(mediaEngine),
+		webrtc.WithInterceptorRegistry(interceptorRegistry),
+	)
+	return api.NewPeerConnection(webrtc.Configuration{})
+}
 
 type Config struct {
 	BaseURL    string
@@ -188,7 +210,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		return err
 	}
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pc, err := newPeerConnection()
 	if err != nil {
 		return err
 	}

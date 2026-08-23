@@ -139,6 +139,21 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote, reques
 		// waiting out the device's intra-frame period.
 		requestFrameFrom(errorPLIGate)
 		decodeErrStreak := 0
+		rawFrames := make(chan *image.YCbCr, 1)
+		go func() {
+			// Conversion stage. Decoupled from packet ingestion so a slow
+			// full-frame YCbCr->RGBA pass can never back up the RTP read
+			// loop; when the converter falls behind, superseded frames are
+			// dropped and only the freshest decoded picture is converted.
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case src := <-rawFrames:
+					stream.publish(Frame{Image: ycbcrToRGBA(src), At: time.Now()})
+				}
+			}
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -177,10 +192,22 @@ func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote, reques
 				}
 				decodeErrStreak = 0
 				if img != nil {
-					// Convert to RGBA here, on the decode goroutine, so the UI's
-					// logic ticks (which carry mouse and keyboard input) never
-					// pay for pixel conversion or the associated allocations.
-					stream.publish(Frame{Image: ycbcrToRGBA(img), At: time.Now()})
+					// Hand the decoded picture to the conversion stage without
+					// ever blocking the packet reader; if the converter is
+					// still busy with the previous frame, drop this one — a
+					// newer frame supersedes it anyway.
+					select {
+					case rawFrames <- img:
+					default:
+						select {
+						case <-rawFrames:
+						default:
+						}
+						select {
+						case rawFrames <- img:
+						default:
+						}
+					}
 				}
 			}
 		}
@@ -336,10 +363,38 @@ func ensureAnnexB(data []byte) []byte {
 }
 
 // ycbcrToRGBA converts a decoded YCbCr frame into an RGBA image. It runs on
-// the decode goroutine so the UI thread only performs GPU pixel uploads.
+// the conversion goroutine so neither the UI thread nor the RTP reader ever
+// pays for pixel conversion. The work is split into horizontal bands that
+// run across CPU cores; disjoint destination rectangles make this race-free.
 func ycbcrToRGBA(src *image.YCbCr) *image.RGBA {
 	dst := image.NewRGBA(image.Rect(0, 0, src.Bounds().Dx(), src.Bounds().Dy()))
-	draw.Draw(dst, dst.Bounds(), src, src.Bounds().Min, draw.Src)
+	bands := runtime.NumCPU()
+	if bands > 4 {
+		bands = 4
+	}
+	if bands < 1 {
+		bands = 1
+	}
+	height := dst.Bounds().Dy()
+	rowsPerBand := (height + bands - 1) / bands
+	var wg sync.WaitGroup
+	for band := 0; band < bands; band++ {
+		y0 := band * rowsPerBand
+		if y0 >= height {
+			break
+		}
+		y1 := y0 + rowsPerBand
+		if y1 > height {
+			y1 = height
+		}
+		wg.Add(1)
+		go func(y0, y1 int) {
+			defer wg.Done()
+			rect := image.Rect(0, y0, dst.Bounds().Dx(), y1)
+			draw.Draw(dst, rect, src, image.Pt(0, y0+src.Bounds().Min.Y), draw.Src)
+		}(y0, y1)
+	}
+	wg.Wait()
 	return dst
 }
 

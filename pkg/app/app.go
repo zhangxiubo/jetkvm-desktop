@@ -717,7 +717,8 @@ func (a *App) sharpenFrame(src *ebiten.Image) *ebiten.Image {
 	if a.sharpenShader == nil {
 		shader, err := ebiten.NewShader([]byte(sharpenShaderSource))
 		if err != nil {
-			logging.Subsystem("video").Error().Err(err).Msg("failed to compile sharpening shader")
+			lg := logging.Subsystem("video")
+			lg.Error().Err(err).Msg("failed to compile sharpening shader")
 			return src
 		}
 		a.sharpenShader = shader

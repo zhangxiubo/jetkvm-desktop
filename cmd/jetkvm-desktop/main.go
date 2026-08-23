@@ -87,7 +87,6 @@ func main() {
 			windowWidth, windowHeight := app.InitialWindowSize(cfg.BaseURL == "")
 			ebiten.SetWindowSize(windowWidth, windowHeight)
 			ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
-			ebiten.SetTPS(120)
 			ebiten.SetWindowTitle("jetkvm-desktop")
 			return ebiten.RunGame(clientApp)
 		},

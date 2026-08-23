@@ -2316,6 +2316,28 @@ func (a *App) settingsVideoBody(snap session.Snapshot) ui.Element {
 			}),
 		}, Spacing: 12, LineSpacing: 8}),
 	)
+	streamChildren = append(streamChildren,
+		ui.Fixed(ui.Spacer{H: 18}),
+		ui.Fixed(settingsSectionLabelElement("Sharpness")),
+		ui.Fixed(ui.Spacer{H: 8}),
+		ui.Fixed(ui.Paragraph{
+			Text:  "Sharpen the video locally on the GPU before it is scaled to this window. Helps when a 1080p stream fills a higher-resolution monitor.",
+			Size:  12,
+			Color: a.currentTheme().Muted,
+		}),
+		ui.Fixed(ui.Spacer{H: 12}),
+		ui.Fixed(ui.Wrap{Children: []ui.Element{
+			settingsActionButton("Off", settingsActionVisual{Active: a.sharpenLevel == 0}, 96, func() {
+				a.setSharpenLevel(0)
+			}),
+			settingsActionButton("Medium", settingsActionVisual{Active: a.sharpenLevel == 1}, 96, func() {
+				a.setSharpenLevel(1)
+			}),
+			settingsActionButton("Strong", settingsActionVisual{Active: a.sharpenLevel == 2}, 96, func() {
+				a.setSharpenLevel(2)
+			}),
+		}, Spacing: 12, LineSpacing: 8}),
+	)
 	switch {
 	case qualityState.Pending:
 		streamChildren = append(streamChildren, ui.Fixed(ui.Spacer{H: 12}), ui.Fixed(settingsStatusElement("Applying…", a.currentTheme().WarningStroke)))

@@ -23,6 +23,7 @@ type Preferences struct {
 	ScrollThrottle            ScrollThrottle `json:"scroll_throttle"`
 	ScrollThrottleMs          int            `json:"scroll_throttle_ms,omitempty"`
 	PointerMoveThrottleMs     int            `json:"pointer_move_throttle_ms,omitempty"`
+	VideoSharpen              uint8          `json:"video_sharpen,omitempty"`
 }
 
 //go:generate go tool github.com/dmarkham/enumer -type=Theme,ChromeAnchor,ChromeLayout,ScrollThrottle -linecomment -json -text -output prefs_enums.go
@@ -85,6 +86,7 @@ func defaultPreferences() Preferences {
 		ScrollThrottle:            scrollThrottleOff,
 		ScrollThrottleMs:          0,
 		PointerMoveThrottleMs:     8,
+		VideoSharpen:              0,
 	}
 }
 

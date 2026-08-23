@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
 	"image"
@@ -27,6 +28,9 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
 )
+
+//go:embed sharpen.k
+var sharpenShaderSource string
 
 type Config struct {
 	BaseURL                string
@@ -95,6 +99,9 @@ type App struct {
 	statsHistory           []statsPoint
 	lastStatsPoll          time.Time
 	lastStallNudge         time.Time
+	sharpenLevel           uint8
+	sharpenShader          *ebiten.Shader
+	sharpenImg             *ebiten.Image
 	launcherOpen           bool
 	launcherMode           launcherMode
 	launcherInput          string
@@ -414,6 +421,7 @@ func New(cfg Config) (*App, error) {
 		invertScroll:        prefs.InvertScroll,
 		showPressedKeys:     prefs.ShowPressedKeys,
 		scrollThrottle:      throttleDurationFromMs(prefs.ScrollThrottleMs),
+	sharpenLevel:        prefs.VideoSharpen,
 		pointerMoveThrottle: throttleDurationFromMs(prefs.PointerMoveThrottleMs),
 		pasteDelay:          100,
 		launcherOpen:        launcherOpen,
@@ -659,6 +667,9 @@ func (a *App) Draw(screen *ebiten.Image) {
 	a.mu.RLock()
 	img := a.lastImg
 	a.mu.RUnlock()
+	if img != nil && a.sharpenLevel > 0 {
+		img = a.sharpenFrame(img)
+	}
 	if img != nil {
 		w, h := img.Bounds().Dx(), img.Bounds().Dy()
 		op := &ebiten.DrawImageOptions{}
@@ -690,6 +701,46 @@ func (a *App) Draw(screen *ebiten.Image) {
 	a.drawSettingsOverlay(screen, snap)
 	a.drawPasteOverlay(screen, snap)
 	a.drawSerialConsoleOverlay(screen, snap)
+}
+
+// setSharpenLevel switches the local GPU sharpening pass (0=off, 1=medium,
+// 2=strong) and persists the choice.
+func (a *App) setSharpenLevel(level uint8) {
+	a.sharpenLevel = level
+	a.savePreferences()
+}
+
+// sharpenFrame renders src through a halo-limited unsharp-mask shader at
+// source resolution. The UI thread owns both the shader and the scratch
+// image, so no locking is needed beyond what Draw already guarantees.
+func (a *App) sharpenFrame(src *ebiten.Image) *ebiten.Image {
+	if a.sharpenShader == nil {
+		shader, err := ebiten.NewShader([]byte(sharpenShaderSource))
+		if err != nil {
+			logging.Subsystem("video").Error().Err(err).Msg("failed to compile sharpening shader")
+			return src
+		}
+		a.sharpenShader = shader
+	}
+	w, h := src.Bounds().Dx(), src.Bounds().Dy()
+	if a.sharpenImg == nil || a.sharpenImg.Bounds().Dx() != w || a.sharpenImg.Bounds().Dy() != h {
+		a.sharpenImg = ebiten.NewImage(w, h)
+	}
+	var amount float32
+	switch a.sharpenLevel {
+	case 1:
+		amount = 0.6
+	case 2:
+		amount = 1.2
+	default:
+		return src
+	}
+	op := &ebiten.DrawRectShaderOptions{
+		Images:   [4]*ebiten.Image{src},
+		Uniforms: map[string]any{"Amount": amount},
+	}
+	a.sharpenImg.DrawRectShader(w, h, a.sharpenShader, op)
+	return a.sharpenImg
 }
 
 func (a *App) Layout(outsideWidth, outsideHeight int) (int, int) {
@@ -1510,6 +1561,7 @@ func (a *App) savePreferences() {
 	a.prefs.ScrollThrottle = scrollThrottlePref(a.scrollThrottle)
 	a.prefs.ScrollThrottleMs = int(a.scrollThrottle / time.Millisecond)
 	a.prefs.PointerMoveThrottleMs = int(a.pointerMoveThrottle / time.Millisecond)
+	a.prefs.VideoSharpen = a.sharpenLevel
 	if a.hotkeys != nil {
 		a.hotkeys.SetEnabled(a.prefs.ExperimentalGlobalHotkeys)
 	}
